@@ -1,0 +1,15 @@
+# Weekly, grouped update pull requests for the GitHub Actions pins (each action is pinned by commit SHA, with the
+# version as the trailing comment). The package has no runtime dependencies; the test tools resolve fresh in every CI
+# run. cooldown: a new release is proposed only after a few days. Merging stays manual.
+version: 2
+updates:
+  - package-ecosystem: github-actions
+    directory: /
+    schedule:
+      interval: weekly
+    cooldown:
+      default-days: 3
+    open-pull-requests-limit: 3
+    groups:
+      github-actions:
+        patterns: ["*"]
