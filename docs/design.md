@@ -143,7 +143,7 @@ from nodestro_session import (
 )
 ```
 
-A product wires it like this (Locria will look like this; `tests/app.py` is a full example):
+A product wires it like this (`tests/app.py` is a full example):
 
 ```python
 sockets = bind_loopback(0)  # random 127.a.b.c, [::1] guard
@@ -241,10 +241,6 @@ That PR needs two things first:
   is brand-neutral, so a rename stays possible before 1.0.
 
 The plan allows Tabrion Studio to stay on its own code if the migration is not accepted.
-
-### 5.4 Locria
-
-Locria uses the library directly (section 4) through the product host. It is not part of this change.
 
 ## 6. Defaults and switches
 
