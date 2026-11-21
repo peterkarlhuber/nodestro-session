@@ -193,3 +193,135 @@ def test_symlinks_are_refused(tmp_path: Path) -> None:
         read_private_file(link)
     with pytest.raises(UnsafePathError, match="not a plain directory"):
         ensure_private_dir(linked_dir)
+
+
+# ---------------------------------------------------------------------------------------------------------------------
+# Review N-02 L2 (POSIX): a parent that another user controls could swap the private directory.
+# ---------------------------------------------------------------------------------------------------------------------
+
+
+@pytest.mark.skipif(not POSIX, reason="POSIX modes")
+def test_a_parent_writable_by_others_without_sticky_bit_is_refused(tmp_path: Path) -> None:
+    parent = tmp_path / "shared"
+    parent.mkdir()
+    os.chmod(parent, 0o777)
+    with pytest.raises(UnsafePathError, match="parent directory can be written"):
+        ensure_private_dir(parent / "state")
+    assert not (parent / "state").exists()
+    os.chmod(parent, 0o775)  # the group alone is enough to swap it
+    with pytest.raises(UnsafePathError, match="parent directory can be written"):
+        ensure_private_dir(parent / "state")
+    os.chmod(parent, 0o1777)  # like /tmp: others cannot rename what they do not own
+    assert ensure_private_dir(parent / "state") == parent / "state"
+
+
+@pytest.mark.skipif(not POSIX, reason="POSIX owners")
+def test_a_parent_owned_by_another_user_is_refused(tmp_path: Path, monkeypatch: pytest.MonkeyPatch) -> None:
+    parent = tmp_path / "theirs"
+    parent.mkdir(mode=0o755)
+    if os.geteuid() == 0:  # type: ignore[attr-defined,unused-ignore]
+        os.chown(parent, 65534, 65534)  # type: ignore[attr-defined,unused-ignore]
+    else:
+        # Everything this user owns looks like another user's; root-owned parents stay trusted.
+        real = os.getuid()  # type: ignore[attr-defined,unused-ignore]
+        monkeypatch.setattr(paths, "_getuid", lambda: real + 4242)
+    with pytest.raises(UnsafePathError, match="parent directory belongs to another user"):
+        ensure_private_dir(parent / "state")
+
+
+@pytest.mark.skipif(not POSIX, reason="POSIX modes")
+def test_check_private_dir_checks_the_parents_too(tmp_path: Path) -> None:
+    state = ensure_private_dir(tmp_path / "shared" / "state")
+    check_private_dir(state)
+    os.chmod(tmp_path / "shared", 0o777)
+    with pytest.raises(UnsafePathError, match="parent directory"):
+        check_private_dir(state)
+
+
+@pytest.mark.skipif(not POSIX, reason="POSIX symlinks")
+def test_a_parent_reached_through_a_symlink_is_checked_where_it_resolves(tmp_path: Path) -> None:
+    real = tmp_path / "real"
+    real.mkdir()
+    os.chmod(real, 0o777)
+    (tmp_path / "link").symlink_to(real)
+    with pytest.raises(UnsafePathError, match="parent directory can be written"):
+        ensure_private_dir(tmp_path / "link" / "state")
+
+
+# ---------------------------------------------------------------------------------------------------------------------
+# Review N-02 L3 (Windows logic, mocked): every parent is checked for reparse points, and "inside the profile" is
+# decided on the path as given.
+# ---------------------------------------------------------------------------------------------------------------------
+
+
+def _windows(
+    monkeypatch: pytest.MonkeyPatch, path: Path, *, reparse: set[str], resolves_to: Path | None, dacl: str | None
+) -> list[Path]:
+    """Mock the Windows view of ``path``; returns the paths whose DACL was checked."""
+    from nodestro_session import _winsec
+
+    profile = Path(os.path.abspath("/home/victim"))
+    keys = {os.path.normcase(os.path.abspath(item)) for item in reparse}
+
+    def lstat(item: object) -> object:
+        info = type("Info", (), {})()
+        info.st_file_attributes = 0x400 if os.path.normcase(str(item)) in keys else 0
+        return info
+
+    original = Path.resolve
+    checked: list[Path] = []
+
+    def resolve(self: Path, strict: bool = False) -> Path:
+        if resolves_to is not None and os.path.normcase(os.path.abspath(self)) == os.path.normcase(
+            os.path.abspath(path)
+        ):
+            return Path(os.path.abspath(resolves_to))
+        return Path(os.path.abspath(self)) if not self.exists() else original(self)
+
+    def dacl_problem(item: Path) -> str | None:
+        checked.append(item)
+        return dacl
+
+    monkeypatch.setattr(paths, "profile_roots", lambda: [profile])
+    monkeypatch.setattr("nodestro_session.private.os.lstat", lstat)
+    monkeypatch.setattr(Path, "resolve", resolve)
+    monkeypatch.setattr("nodestro_session.private.sys.platform", "win32")
+    monkeypatch.setattr(_winsec, "dacl_problem", dacl_problem, raising=False)
+    return checked
+
+
+def test_windows_a_junction_in_a_parent_outside_the_profile_is_refused(monkeypatch: pytest.MonkeyPatch) -> None:
+    path = Path("/public/app/state")
+    _windows(monkeypatch, path, reparse={"/public/app"}, resolves_to=Path("/home/victim/x/state"), dacl=None)
+    with pytest.raises(UnsafePathError, match="junction or link"):
+        paths._check_windows_dir(path)
+
+
+def test_windows_a_junction_above_the_profile_is_refused(monkeypatch: pytest.MonkeyPatch) -> None:
+    path = Path("/home/victim/app/state")
+    _windows(monkeypatch, path, reparse={"/home"}, resolves_to=None, dacl=None)
+    with pytest.raises(UnsafePathError, match="junction or link"):
+        paths._check_windows_dir(path)
+
+
+def test_windows_a_path_that_resolves_into_the_profile_needs_a_private_dacl(monkeypatch: pytest.MonkeyPatch) -> None:
+    path = Path("/public/app/state")
+    checked = _windows(monkeypatch, path, reparse=set(), resolves_to=Path("/home/victim/x/state"), dacl="Everyone")
+    with pytest.raises(UnsafePathError, match="not private"):
+        paths._check_windows_dir(path)
+    assert checked == [path]
+
+
+def test_windows_a_profile_path_that_resolves_elsewhere_needs_a_private_dacl(monkeypatch: pytest.MonkeyPatch) -> None:
+    path = Path("/home/victim/app/state")
+    checked = _windows(monkeypatch, path, reparse=set(), resolves_to=Path("/public/app/state"), dacl="Everyone")
+    with pytest.raises(UnsafePathError, match="not private"):
+        paths._check_windows_dir(path)
+    assert checked == [path]
+
+
+def test_windows_a_plain_profile_path_needs_no_dacl_check(monkeypatch: pytest.MonkeyPatch) -> None:
+    path = Path("/home/victim/app/state")
+    checked = _windows(monkeypatch, path, reparse=set(), resolves_to=Path("/home/victim/app/state"), dacl="Everyone")
+    paths._check_windows_dir(path)
+    assert checked == []

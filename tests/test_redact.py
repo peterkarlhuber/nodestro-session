@@ -54,3 +54,22 @@ def test_short_lived_secrets_are_bounded_and_lasting_ones_kept() -> None:
 def test_a_secret_inside_another_is_replaced_whole() -> None:
     redactor = SecretRedactor(["token-part", "token-part-and-more"], marker="***")
     assert redactor.redact("x token-part-and-more y") == "x *** y"
+
+
+# Review N-02 (informational): the parameter name matches in any case and percent-encoded.
+
+
+def test_query_tokens_are_redacted_in_any_case_and_encoding() -> None:
+    redactor = SecretRedactor()
+    for line in (
+        "GET /x?Token=abcdef HTTP/1.1",
+        "GET /x?TOKEN=abcdef HTTP/1.1",
+        "GET /x?%74oken=abcdef HTTP/1.1",
+        "GET /x?%54%4F%4B%45%4E=abcdef HTTP/1.1",
+        "GET /x?token%3Dabcdef HTTP/1.1",
+        "GET /x%3Ftoken=abcdef HTTP/1.1",
+        "GET /x?a=1&tOkEn=abcdef&b=2 HTTP/1.1",
+        "GET /x?a=1%26token=abcdef HTTP/1.1",
+    ):
+        assert "abcdef" not in redactor.redact(line), line
+    assert redactor.redact("GET /x?tokens=abcdef&mytoken=abcdef") == "GET /x?tokens=abcdef&mytoken=abcdef"

@@ -7,9 +7,15 @@ An existing directory is checked, never repaired behind the user's back: one tha
 group or others may write to, is refused (:class:`UnsafePathError`), because another user may already have placed
 files in it. Read and search bits for group and others are removed, since nothing secret has been written yet.
 
-On Windows the modes are not enforced by the OS. There the directory and each of its parents up to the user's
-profile must not be a symlink, junction or other reparse point, and a directory outside the profile is accepted only
-if its access control list is private to the user (:mod:`nodestro_session._winsec`).
+The parents count too (POSIX): a parent that another user (other than root) owns, or that the group or others may
+write to without the sticky bit, lets that user rename the private directory away and put its own in its place, and
+then replace the files written there (a redirect file with its own page). Such a path is refused, on the path as given
+and on the path its symlinks resolve to; a symlink on the way must belong to the user or to root.
+
+On Windows the modes are not enforced by the OS. There the directory and every one of its parents must not be a
+symlink, junction or other reparse point. Whether the directory is inside the user's profile is decided on the path as
+given (not on where it resolves to), and a directory outside the profile, or one whose resolved path differs from the
+path as given, is accepted only if its access control list is private to the user (:mod:`nodestro_session._winsec`).
 """
 
 from __future__ import annotations
@@ -57,7 +63,12 @@ def ensure_private_dir(path: Path) -> Path:
     Raises :class:`UnsafePathError` for a symlink or junction, a directory owned by another user or one that the group
     or others may write to (POSIX), and on Windows for a directory outside the user's profile without a private ACL.
     """
+    if _POSIX:
+        # Before anything is created: a parent another user controls could swap what is created below it.
+        _check_posix_parents(path)
     path.mkdir(mode=0o700, parents=True, exist_ok=True)
+    if _POSIX:
+        _check_posix_parents(path)
     info = os.lstat(path)
     if stat.S_ISLNK(info.st_mode) or not stat.S_ISDIR(info.st_mode) or _is_reparse_point(info):
         raise UnsafePathError(f"the directory is not a plain directory: {path}")
@@ -94,8 +105,33 @@ def check_private_dir(path: Path) -> None:
         mode = stat.S_IMODE(info.st_mode)
         if mode & 0o022:
             raise UnsafePathError(f"the directory can be written by other users (mode {mode:o}): {path}")
+        _check_posix_parents(path)
     else:
         _check_windows_dir(path)
+
+
+def _check_posix_parents(path: Path) -> None:
+    """Refuse a path with a parent that another user could use to swap the private directory (module docstring).
+
+    Checked: every existing parent of the path as given (``lstat``; a symlink must belong to the user or root) and of
+    the path its symlinks resolve to. Parents that do not exist yet are created by this user."""
+    uid = _getuid()
+    absolute = Path(os.path.abspath(path))
+    resolved = Path(os.path.realpath(path))
+    for folder in (*absolute.parents, *resolved.parents):
+        try:
+            info = os.lstat(folder)
+        except FileNotFoundError:
+            continue
+        if info.st_uid not in (uid, 0):
+            raise UnsafePathError(f"a parent directory belongs to another user: {folder}")
+        if stat.S_ISLNK(info.st_mode):
+            continue  # its target is a parent of the resolved path, checked as well
+        mode = stat.S_IMODE(info.st_mode)
+        if mode & 0o022 and not mode & stat.S_ISVTX:
+            raise UnsafePathError(
+                f"a parent directory can be written by other users without the sticky bit (mode {mode:o}): {folder}"
+            )
 
 
 def _is_reparse_point(info: os.stat_result) -> bool:
@@ -125,16 +161,20 @@ def profile_roots() -> list[Path]:
 
 def _check_windows_dir(path: Path) -> None:
     roots = profile_roots()
-    root_keys = {os.path.normcase(str(root)) for root in roots}
     absolute = Path(os.path.abspath(path))
-    # The directory itself and every folder between it and the profile root must be plain directories: a junction
-    # there could redirect the state into a folder that other users can read.
+    # The directory itself and every one of its parents must be plain directories: a junction anywhere on the way (also
+    # above the profile, or in a parent outside it) could redirect the state into a folder that other users control.
     for folder in (absolute, *absolute.parents):
-        if folder != absolute and (os.path.normcase(str(folder)) in root_keys or not is_within(folder, roots)):
-            break
-        if _is_reparse_point(os.lstat(folder)):
+        try:
+            info = os.lstat(folder)
+        except FileNotFoundError:
+            continue
+        if _is_reparse_point(info):
             raise UnsafePathError(f"the directory path contains a junction or link: {folder}")
-    if is_within(path.resolve(), roots):
+    # Inside the profile is decided on the path as given; a path that resolves somewhere else is checked like one
+    # outside the profile (the ACL must be private), wherever it resolves to.
+    resolved = path.resolve()
+    if is_within(absolute, roots) and os.path.normcase(str(resolved)) == os.path.normcase(str(absolute)):
         return
     if sys.platform == "win32":
         from ._winsec import dacl_problem

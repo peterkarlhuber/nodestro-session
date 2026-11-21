@@ -131,3 +131,49 @@ def test_short_secrets_are_refused() -> None:
     assert (caught.value.length, caught.value.minimum) == (5, 32)
     with pytest.raises(WeakSecretError):
         check_secret_length("s" * 40, minimum=43)
+
+
+# Review N-02 L4: the pending tokens stay bounded; issue() sweeps expired ones and drops the oldest beyond the cap.
+
+
+def test_pending_tokens_are_bounded_and_the_oldest_is_dropped_with_its_file(tmp_path: Path) -> None:
+    from nodestro_session.tokens import MAX_PENDING
+
+    ensure_private_dir(tmp_path / "s")
+    launches = LaunchTokens("http://127.0.0.1:5000", tmp_path / "s", "app-k")
+    first = launches.issue(redirect=True)
+    issued = [launches.issue(redirect=False) for _ in range(MAX_PENDING * 3)]
+    assert launches.pending == MAX_PENDING
+    assert first.redirect is not None and not first.redirect.exists()  # dropped, and its file deleted
+    assert launches.redeem(first.url.rsplit("#", 1)[1]) == "expired"
+    assert launches.redeem(issued[-1].url.rsplit("#", 1)[1]) == "ok"
+    many = LaunchTokens("http://127.0.0.1:1")
+    for _ in range(5000):
+        many.issue(redirect=False)
+    assert many.pending == MAX_PENDING
+
+
+def test_issue_sweeps_expired_tokens(tmp_path: Path) -> None:
+    clock = Clock()
+    ensure_private_dir(tmp_path / "s")
+    launches = LaunchTokens("http://127.0.0.1:5000", tmp_path / "s", "app-k", clock=clock, max_pending=8)
+    old = launches.issue(redirect=True)
+    clock.now += LAUNCH_TTL_SECONDS
+    launches.issue(redirect=False)
+    assert launches.pending == 1
+    assert old.redirect is not None and not old.redirect.exists()
+    with pytest.raises(ValueError):
+        LaunchTokens("http://127.0.0.1:5000", max_pending=0)
+
+
+@pytest.mark.skipif(not POSIX, reason="POSIX modes")
+def test_issue_checks_the_redirect_directory_again(tmp_path: Path) -> None:
+    from nodestro_session import UnsafePathError
+
+    state = ensure_private_dir(tmp_path / "s")
+    launches = LaunchTokens("http://127.0.0.1:5000", state, "app-k")
+    state.chmod(0o777)  # swapped or opened since it was created
+    with pytest.raises(UnsafePathError):
+        launches.issue(redirect=True)
+    assert list(state.iterdir()) == []
+    assert launches.pending == 0

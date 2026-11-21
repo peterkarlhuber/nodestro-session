@@ -13,7 +13,8 @@ readable by every local user. :meth:`LaunchTokens.issue` with ``redirect=True`` 
     <meta http-equiv="refresh" content="0;url=http://<address>:<port>/launch#<token>">
 
 and the browser is opened with its ``file://`` path, which holds no secret. The file is deleted as soon as its token
-is redeemed, when the token expires (:meth:`LaunchTokens.sweep`) and when the server stops (:meth:`LaunchTokens.close`).
+is redeemed, when the token expires (:meth:`LaunchTokens.sweep`, also run by every :meth:`LaunchTokens.issue`), when
+more than ``max_pending`` tokens wait (the oldest is dropped) and when the server stops (:meth:`LaunchTokens.close`).
 
 Only SHA-256 digests of the tokens are kept. ``on_secret`` is called with every new token, for log redaction
 (:class:`nodestro_session.redact.SecretRedactor`).
@@ -35,7 +36,7 @@ import threading
 import time
 from typing import Literal
 
-from .private import remove_file, write_private_file
+from .private import check_private_dir, remove_file, write_private_file
 
 LAUNCH_PATH = "/launch"
 LAUNCH_TTL_SECONDS = 120.0
@@ -44,6 +45,8 @@ MIN_SECRET_LENGTH = 32
 #: The form of the tokens :meth:`LaunchTokens.issue` creates (``secrets.token_urlsafe(32)``).
 TOKEN_PATTERN = re.compile(r"[A-Za-z0-9_-]{43}")
 _SPENT_KEPT = 256
+#: At most this many issued tokens wait for redemption; :meth:`LaunchTokens.issue` drops the oldest beyond it.
+MAX_PENDING = 32
 
 Redemption = Literal["ok", "used", "expired", "invalid"]
 
@@ -111,7 +114,8 @@ class LaunchTokens:
 
     ``origin`` is ``http://<address>:<port>`` and ``path`` the launch page. Redirect files go to ``redirect_dir`` (a
     private directory) with names that start with ``prefix``; ``name`` is the app's name on the redirect page.
-    ``clock`` is monotonic seconds. ``on_secret`` gets every new token (log redaction).
+    ``clock`` is monotonic seconds. ``on_secret`` gets every new token (log redaction). At most ``max_pending``
+    tokens wait for redemption: a new one drops the oldest (it counts as expired and its redirect file is deleted).
     """
 
     def __init__(
@@ -125,8 +129,12 @@ class LaunchTokens:
         path: str = LAUNCH_PATH,
         name: str = "the app",
         on_secret: Callable[[str], None] | None = None,
+        max_pending: int = MAX_PENDING,
     ) -> None:
+        if max_pending < 1:
+            raise ValueError("max_pending must be at least 1")
         self.origin = origin.rstrip("/")
+        self.max_pending = max_pending
         self.redirect_dir = redirect_dir
         self.prefix = prefix
         self.ttl = ttl
@@ -144,7 +152,9 @@ class LaunchTokens:
         return len(self._pending)
 
     def issue(self, *, redirect: bool) -> Launch:
-        """A new one-time launch URL; with ``redirect``, also a redirect file that opens it."""
+        """A new one-time launch URL; with ``redirect``, also a redirect file that opens it. Expired tokens are swept
+        first, and the oldest pending token is dropped when more than ``max_pending`` would wait."""
+        self.sweep()
         token = secrets.token_urlsafe(32)
         if self._on_secret is not None:
             self._on_secret(token)
@@ -153,10 +163,19 @@ class LaunchTokens:
         if redirect:
             if self.redirect_dir is None:
                 raise RuntimeError("no directory for redirect files")
+            # Checked again before each write: the directory may have been swapped since it was created.
+            check_private_dir(self.redirect_dir)
             file = self.redirect_dir / f"{self.prefix}-launch-{secrets.token_hex(8)}.html"
             write_private_file(file, redirect_page(url, self.name))
+        dropped: list[_Pending] = []
         with self._lock:
             self._pending[_digest(token)] = _Pending(self._clock() + self.ttl, file)
+            while len(self._pending) > self.max_pending:
+                key = next(iter(self._pending))
+                dropped.append(self._pending.pop(key))
+                self._remember(key, "expired")
+        for entry in dropped:
+            self._remove(entry.redirect)
         return Launch(url, file)
 
     def redeem(self, token: object) -> Redemption:
