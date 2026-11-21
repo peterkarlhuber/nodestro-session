@@ -8,11 +8,16 @@ The checks, in this order (the first that fails answers; its neutral code in bra
 2. **Forwarded headers.** ``Forwarded``, ``X-Forwarded-*`` and ``X-Real-IP`` are refused (``forwarded_not_allowed``,
    403): a local app is never meant to sit behind a proxy.
 3. **Origin.** An ``Origin`` other than the app's own is refused (``origin_not_allowed``, 403).
-4. **Unusual paths.** A path with a ``.`` or ``..`` segment, an empty segment (``//``) or a backslash is refused
-   (``not_found``, 404), on every path, not only under the API prefix: a later mount, router or path normalization
-   could otherwise turn ``/static/../api/control/shutdown`` or ``//api/x`` into a guarded route that skipped the
-   session or control checks. The API and control prefixes are matched without regard to case (``/API/x`` is an API
-   path), so an app that routes case-insensitively gets no unguarded path either.
+4. **Unusual paths.** A path with a ``.`` or ``..`` segment, an empty segment (``//``), a backslash, a NUL or a
+   percent sign that still encodes a dot, slash, backslash, percent sign or NUL (``%2e``, ``%2f``, ``%5c``, ``%25``,
+   ``%00``, any case) is refused (``not_found``, 404), on every path, not only under the API prefix: a later mount,
+   router, path normalization or second percent-decoding could otherwise turn ``/static/../api/control/shutdown``,
+   ``//api/x`` or ``/x/%2e%2e/api/x`` into a guarded route that skipped the session or control checks. The same holds
+   for the path's NFKC form (fullwidth full stops and solidi). The API and control prefixes are matched
+   case-insensitively the way ``re.IGNORECASE`` does it, which also folds U+0131 (dotless i), U+017F (long s) and
+   U+212A (Kelvin sign) to ``i``, ``s`` and ``k``, and also after ``str.casefold`` and NFKC normalization. A path that
+   any of these maps under a prefix is treated as under it, so an app that routes case-insensitively or normalizes
+   Unicode gets no unguarded path either. Such a path is only ever classified more strictly.
 5. **Control endpoints** (only with ``control_prefix``): any ``Origin`` or ``Sec-Fetch-*`` header is refused
    (``browser_not_allowed``, 403). A command line client never sends them and every current browser does, so a page
    can never drive the control channel, even with the token.
@@ -49,6 +54,8 @@ from __future__ import annotations
 from collections.abc import Awaitable, Callable, Iterable, Sequence
 from dataclasses import dataclass
 import json
+import re
+import unicodedata
 from urllib.parse import urlsplit
 
 from ._asgi import ASGIApp, Message, Receive, Scope, Send
@@ -138,15 +145,32 @@ def with_security_headers(send: Send, headers: Sequence[tuple[str, str]] = SECUR
     return wrapped
 
 
-def _under(path: str, prefix: str) -> bool:
-    prefix = prefix.rstrip("/")
-    return path == prefix or path.startswith(prefix + "/")
+#: Percent-encodings that a second decoding would turn into a dot, slash, backslash, percent sign or NUL.
+_ENCODED = re.compile(r"%(?:2e|2f|5c|25|00)", re.IGNORECASE)
+
+
+def _prefix_pattern(prefix: str, *, segment: bool) -> re.Pattern[str]:
+    """``prefix`` at the start of a path, case-insensitive as ``re.IGNORECASE`` routers match it; with ``segment``,
+    followed by ``/`` or the end."""
+    return re.compile(re.escape(prefix) + (r"(?=/|$)" if segment else ""), re.IGNORECASE)
+
+
+def _forms(path: str) -> tuple[str, ...]:
+    """``path`` as a case-insensitive or Unicode-normalizing router may see it."""
+    return (path, path.casefold(), unicodedata.normalize("NFKC", path).casefold())
 
 
 def unusual_path(path: str) -> bool:
+    """Whether ``path`` or its NFKC form (fullwidth full stop and solidus become ``.`` and ``/``) is unusual
+    (:func:`_unusual`)."""
+    return _unusual(path) or _unusual(unicodedata.normalize("NFKC", path))
+
+
+def _unusual(path: str) -> bool:
     """Whether ``path`` has a ``.`` or ``..`` segment, an empty segment (``//``; a trailing ``/`` is fine), a
-    backslash or a NUL: anything that a later normalization could map onto another path. ``/`` is a usual path."""
-    if not path.startswith("/") or "\\" in path or "\x00" in path:
+    backslash, a NUL or an encoded ``%2e``, ``%2f``, ``%5c``, ``%25`` or ``%00``: anything that a later normalization
+    or a second percent-decoding could map onto another path. ``/`` is a usual path."""
+    if not path.startswith("/") or "\\" in path or "\x00" in path or _ENCODED.search(path):
         return True
     segments = path[1:].split("/")
     return any(segment in (".", "..") for segment in segments) or "" in segments[:-1]
@@ -193,8 +217,10 @@ class SessionGuard:
         self.cookie = cookie
         self.csrf_header = csrf_header.lower()
         self.api_prefix = api_prefix.rstrip("/").lower()
+        self._api_pattern = _prefix_pattern(self.api_prefix, segment=True) if self.api_prefix else None
         self.open_paths = frozenset(open_paths)
         self.control_prefix = control_prefix.rstrip("/").lower() + "/" if control_prefix else None
+        self._control_pattern = _prefix_pattern(self.control_prefix, segment=False) if self.control_prefix else None
         # An empty token opens nothing: every control path but the open ones is then refused.
         self._control_token = control_token.encode("utf-8")
         self.control_open_paths = frozenset(control_open_paths)
@@ -232,10 +258,11 @@ class SessionGuard:
             return "origin_not_allowed"
         if unusual_path(path):
             return "not_found"
-        # The prefixes are compared in lower case: an app that routes /API/x like /api/x gets no unguarded path.
-        lowered = path.lower()
-        api = _under(lowered, self.api_prefix) if self.api_prefix else True
-        control = self.control_prefix is not None and lowered.startswith(self.control_prefix)
+        # The prefixes match in every form a case-insensitive or normalizing router may see (_forms, re.IGNORECASE).
+        forms = _forms(path)
+        api_pattern, control_pattern = self._api_pattern, self._control_pattern
+        api = any(api_pattern.match(form) for form in forms) if api_pattern is not None else True
+        control = control_pattern is not None and any(control_pattern.match(form) for form in forms)
         unsafe = method not in SAFE_METHODS
         if control:
             if origins or any(key.startswith("sec-fetch-") for key, _ in headers):

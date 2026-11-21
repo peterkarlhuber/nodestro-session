@@ -699,3 +699,107 @@ def test_usual_paths_still_pass() -> None:
     for path in ("/", "/assets/app.js", "/api/health", "/api/control/proof", "/assets/v1.2/app.js"):
         assert _asgi_status(own, path, "GET") == 0, path
     assert _asgi_status(own, "/api/heartbeat/", "GET") == 401  # a trailing slash is a usual API path
+
+
+# ---------------------------------------------------------------------------------------------------------------------
+# Review N-02 (re-check of #2): routers that fold Unicode (re.IGNORECASE, casefold, NFKC) or decode a second time.
+# ---------------------------------------------------------------------------------------------------------------------
+
+
+def _status_behind(app: Any, path: str) -> int:
+    sent: list[dict[str, Any]] = []
+
+    async def send(message: Any) -> None:
+        sent.append(message)
+
+    async def receive() -> Any:
+        return {"type": "http.request", "body": b""}
+
+    guard = SessionGuard(
+        app, origin=ORIGIN, sessions=SessionStore(), cookie=COOKIE, control_prefix="/api/control", control_token=TOKEN
+    )
+    scope = {
+        "type": "http",
+        "path": path,
+        "raw_path": path.encode(),
+        "method": "GET",
+        "headers": [(b"host", HOST.encode())],
+        "query_string": b"",
+    }
+    asyncio.run(guard(scope, receive, send))
+    return int(sent[0]["status"])
+
+
+@pytest.mark.parametrize(
+    "path",
+    [
+        "/ap\u0131/secret",  # U+0131 dotless i
+        "/ap\u0131/control/shutdown",
+        "/AP\u0130/secret",  # U+0130
+        "/api/contro\u017f/shutdown",  # U+017F long s: still under the API prefix
+        "/\uff41\uff50\uff49/secret",  # fullwidth, NFKC
+    ],
+)
+def test_unicode_folding_routers_get_no_unguarded_api_path(path: str) -> None:
+    import re
+    import unicodedata
+
+    routes = [re.compile(r"/api/secret", re.IGNORECASE), re.compile(r"/api/control/shutdown", re.IGNORECASE)]
+
+    async def router(scope: Any, receive: Any, send: Any) -> None:
+        seen = unicodedata.normalize("NFKC", scope["path"])
+        hit = any(route.fullmatch(seen) for route in routes)
+        await send({"type": "http.response.start", "status": 200 if hit else 404, "headers": []})
+        await send({"type": "http.response.body", "body": b""})
+
+    assert _status_behind(router, "/API/secret") == 401
+    assert _status_behind(router, path) == 401
+
+
+def test_a_folded_control_prefix_needs_the_control_token() -> None:
+    import re
+
+    async def router(scope: Any, receive: Any, send: Any) -> None:
+        hit = re.fullmatch(r"/api/control/shutdown", scope["path"], re.IGNORECASE) is not None
+        await send({"type": "http.response.start", "status": 200 if hit else 404, "headers": []})
+        await send({"type": "http.response.body", "body": b""})
+
+    for path in ("/ap\u0131/control/shutdown", "/api/control/\u017fhutdown", "/API/CONTROL/shutdown"):
+        assert _status_behind(router, path) == 401, path
+    own = [(b"host", HOST.encode()), (b"content-type", b"application/json")]
+    assert _asgi_status(own, "/ap\u0131/control/launch", "POST") == 401
+    auth = (b"authorization", CONTROL_AUTH["Authorization"].encode())
+    assert _asgi_status([*own, auth], "/ap\u0131/control/launch", "POST") == 0  # classified as a control path
+
+
+@pytest.mark.parametrize(
+    "path",
+    [
+        "/x/%2e%2e/api/secret",
+        "/x/%2E%2E/api/secret",
+        "/x%2f..%2fapi/secret",
+        "/x/..%5capi/secret",
+        "/x/%252e%252e/api/secret",
+        "/assets/%00",
+        "/x/\uff0e\uff0e/api/secret",  # fullwidth full stops, NFKC
+        "/x\uff0f..\uff0fapi/secret",  # fullwidth solidus, NFKC
+    ],
+)
+def test_paths_a_second_decoding_could_change_are_refused(path: str) -> None:
+    from urllib.parse import unquote
+
+    async def decoding_app(scope: Any, receive: Any, send: Any) -> None:
+        import posixpath
+        import unicodedata
+
+        seen = posixpath.normpath(unquote(unquote(unicodedata.normalize("NFKC", scope["path"]))).replace("\\", "/"))
+        await send({"type": "http.response.start", "status": 200 if seen == "/api/secret" else 404, "headers": []})
+        await send({"type": "http.response.body", "body": b""})
+
+    assert _status_behind(decoding_app, path) == 404
+
+
+def test_usual_paths_with_unicode_and_percent_signs_still_pass() -> None:
+    own = [(b"host", HOST.encode())]
+    for path in ("/assets/caf\u00e9.js", "/assets/100%.txt", "/assets/%41.js", "/apiary"):
+        assert _asgi_status(own, path, "GET") == 0, path
