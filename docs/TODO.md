@@ -2,7 +2,7 @@
 
 > Open work for this repository. Design and threat model: [design.md](design.md).
 >
-> **Last full review:** 2026-11-21 (N-02: CI manifest and ci-ok)
+> **Last full review:** 2026-11-21 (N-02 independent review: no Critical, High or Medium; the four Lows are fixed)
 
 ## Summary
 
@@ -27,7 +27,7 @@ Statuses: `Open`, `In progress`, `Blocked` (names the blocker), `Needs decision`
 
 | ID | Priority | Status | Item |
 |---|---|---|---|
-| NS-001 | P1 | Needs external review | Internal security review of 0.1 (no high findings) and an independent review before phase E (SEC-7). Covers the guard order, the session store and the private-file checks. |
+| NS-001 | P1 | Needs external review | Independent review before phase E (SEC-7). The independent review of 0.1 (N-02, nodestro-session #1) found no Critical, High or Medium issue; its four Lows (path classification in `SessionGuard`, parents of private directories, Windows junction and DACL checks, unbounded pending launch tokens) and the redaction note are fixed on branch `claude/n02-review-lows`. Covers the guard order, the session store and the private-file checks. |
 | NS-002 | P1 | Open | nodestro-api hardening steps of design.md 5.2, each behind a switch that is off by default: launch-secret TTL, CSRF header + JSON only + required Origin (studio frontend first), logout on the desktop, no terminal mode without a secret, token in the fragment, `bind_loopback` for the desktop backend. |
 | NS-003 | P1 | Blocked | Tabrion Studio migration (design.md 5.3). Blocked by a K-33 decision on the dependency edge `tabrion-studio -> nodestro-session` and by the naming question (a `nodestro-` package under Tabrion). |
 | NS-004 | P2 | Open | `peer`: optional check that a TCP peer belongs to the same OS user (Linux `sock_diag` or `/proc/net/tcp`, macOS `pcblist_n` or libproc, Windows `GetExtendedTcpTable` with the process SID). Policy `off \| warn \| require`, off by default. It must report "unknown" in containers (Local Docker) instead of a false "ok". Needs a spike per platform (P0-5 b). |

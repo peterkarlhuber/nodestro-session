@@ -2,8 +2,9 @@
 
 :class:`SecretRedactor` is a ``logging.Filter``. Add it to a logger (for example ``uvicorn.access``, which prints the
 full request line) or to a handler. It replaces every registered secret and the values of the named query parameters
-(``?token=...``) in the message and in its arguments. Formatters such as uvicorn's ``AccessFormatter`` unpack the
-arguments, so they are kept as arguments, redacted.
+(``?token=...``) in the message and in its arguments. The parameter names match without regard to case and also
+percent-encoded (``?Token=``, ``?%74oken=``, ``?token%3D...``), as a server may decode them either way. Formatters
+such as uvicorn's ``AccessFormatter`` unpack the arguments, so they are kept as arguments, redacted.
 
 Long-lived secrets (``lasting=True``: an access key, a control token) are kept until the process ends. Short-lived
 ones (launch tokens, session IDs, CSRF values) share a bounded store where the oldest go first, so that a long-running
@@ -20,6 +21,15 @@ import threading
 
 REDACTED = "[redacted]"
 _KEPT = 1024
+
+
+def _encodable(name: str) -> str:
+    """A pattern for ``name`` in which every character may also be percent-encoded (matched with IGNORECASE)."""
+    parts = []
+    for char in name:
+        codes = {f"%{ord(variant):02x}" for variant in (char.lower(), char.upper()) if ord(variant) < 128}
+        parts.append("(?:" + "|".join([re.escape(char), *sorted(codes)]) + ")")
+    return "".join(parts)
 
 
 class SecretRedactor(logging.Filter):
@@ -39,8 +49,10 @@ class SecretRedactor(logging.Filter):
         self._lasting: set[str] = set()
         self._recent: OrderedDict[str, None] = OrderedDict()
         self._lock = threading.Lock()
-        names = [re.escape(name) for name in query_params]
-        self._query = re.compile(rf"([?&](?:{'|'.join(names)})=)[^&\s\"]*") if names else None
+        names = [_encodable(name) for name in query_params if name]
+        self._query = (
+            re.compile(rf"((?:[?&;]|%3f|%26)(?:{'|'.join(names)})(?:=|%3d))[^&\s\"]*", re.IGNORECASE) if names else None
+        )
         for secret in secrets:
             self.add(secret, lasting=True)
 

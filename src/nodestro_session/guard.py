@@ -8,8 +8,11 @@ The checks, in this order (the first that fails answers; its neutral code in bra
 2. **Forwarded headers.** ``Forwarded``, ``X-Forwarded-*`` and ``X-Real-IP`` are refused (``forwarded_not_allowed``,
    403): a local app is never meant to sit behind a proxy.
 3. **Origin.** An ``Origin`` other than the app's own is refused (``origin_not_allowed``, 403).
-4. **Dot segments.** An API path with a ``.`` or ``..`` segment is refused (``not_found``, 404), so that a later
-   mount or path normalization cannot turn ``/api/control/../x`` into a route outside the control prefix.
+4. **Unusual paths.** A path with a ``.`` or ``..`` segment, an empty segment (``//``) or a backslash is refused
+   (``not_found``, 404), on every path, not only under the API prefix: a later mount, router or path normalization
+   could otherwise turn ``/static/../api/control/shutdown`` or ``//api/x`` into a guarded route that skipped the
+   session or control checks. The API and control prefixes are matched without regard to case (``/API/x`` is an API
+   path), so an app that routes case-insensitively gets no unguarded path either.
 5. **Control endpoints** (only with ``control_prefix``): any ``Origin`` or ``Sec-Fetch-*`` header is refused
    (``browser_not_allowed``, 403). A command line client never sends them and every current browser does, so a page
    can never drive the control channel, even with the token.
@@ -140,6 +143,15 @@ def _under(path: str, prefix: str) -> bool:
     return path == prefix or path.startswith(prefix + "/")
 
 
+def unusual_path(path: str) -> bool:
+    """Whether ``path`` has a ``.`` or ``..`` segment, an empty segment (``//``; a trailing ``/`` is fine), a
+    backslash or a NUL: anything that a later normalization could map onto another path. ``/`` is a usual path."""
+    if not path.startswith("/") or "\\" in path or "\x00" in path:
+        return True
+    segments = path[1:].split("/")
+    return any(segment in (".", "..") for segment in segments) or "" in segments[:-1]
+
+
 class SessionGuard:
     """Applies the checks of this module to every HTTP request and the security headers to every answer.
 
@@ -180,9 +192,9 @@ class SessionGuard:
         self.sessions = sessions
         self.cookie = cookie
         self.csrf_header = csrf_header.lower()
-        self.api_prefix = api_prefix.rstrip("/")
+        self.api_prefix = api_prefix.rstrip("/").lower()
         self.open_paths = frozenset(open_paths)
-        self.control_prefix = control_prefix.rstrip("/") + "/" if control_prefix else None
+        self.control_prefix = control_prefix.rstrip("/").lower() + "/" if control_prefix else None
         # An empty token opens nothing: every control path but the open ones is then refused.
         self._control_token = control_token.encode("utf-8")
         self.control_open_paths = frozenset(control_open_paths)
@@ -218,10 +230,12 @@ class SessionGuard:
         origins = [value.strip().lower() for key, value in headers if key == "origin"]
         if any(origin != self.origin for origin in origins):
             return "origin_not_allowed"
-        api = _under(path, self.api_prefix) if self.api_prefix else True
-        control = self.control_prefix is not None and path.startswith(self.control_prefix)
-        if api and any(segment in (".", "..") for segment in path.split("/")):
+        if unusual_path(path):
             return "not_found"
+        # The prefixes are compared in lower case: an app that routes /API/x like /api/x gets no unguarded path.
+        lowered = path.lower()
+        api = _under(lowered, self.api_prefix) if self.api_prefix else True
+        control = self.control_prefix is not None and lowered.startswith(self.control_prefix)
         unsafe = method not in SAFE_METHODS
         if control:
             if origins or any(key.startswith("sec-fetch-") for key, _ in headers):

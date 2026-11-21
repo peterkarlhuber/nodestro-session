@@ -332,8 +332,10 @@ def test_only_get_and_head_of_open_control_paths_skip_the_token() -> None:
     assert _asgi_status(own, proof, "HEAD") == 0
     for method in ("POST", "PUT", "DELETE", "PATCH", "OPTIONS"):
         assert _asgi_status(own, proof, method) == 401, method
-    for path in ("/api/control/proof/", "/api/control//proof", "/api/control/launch", "/api/control/x"):
+    for path in ("/api/control/proof/", "/api/control/launch", "/api/control/x"):
         assert _asgi_status(own, path, "GET") == 401, path
+    # An empty segment is refused before the token check (review N-02 L1).
+    assert _asgi_status(own, "/api/control//proof", "GET") == 404
     token = [*own, (b"authorization", f"Bearer {TOKEN}".encode())]
     assert _asgi_status(token, proof, "POST") == 0
     assert _asgi_status([*token, (b"authorization", f"Bearer {TOKEN}".encode())], "/api/control/launch", "POST") == 401
@@ -621,3 +623,79 @@ def test_a_product_sends_its_own_refusals() -> None:
     assert sent[1]["body"] == b"access.host_not_allowed"
     # The security headers are added to the product's refusal too.
     assert (b"x-frame-options", b"DENY") in sent[0]["headers"]
+
+
+# ---------------------------------------------------------------------------------------------------------------------
+# Review N-02 L1: an app that normalizes paths (merges slashes, resolves dot segments, ignores case) gets no path that
+# skipped the session or control checks.
+# ---------------------------------------------------------------------------------------------------------------------
+
+
+def _normalizing_status(path: str, method: str = "GET") -> int:
+    """The status of ``path`` through the guard, in front of an app that routes on a normalized, lower-case path."""
+    import posixpath
+
+    sent: list[dict[str, Any]] = []
+
+    async def app(scope: Any, receive: Any, send: Any) -> None:
+        normalized = posixpath.normpath("/" + scope["path"].replace("\\", "/").lstrip("/")).lower()
+        found = normalized in ("/api/secret", "/api/control/shutdown")
+        await send({"type": "http.response.start", "status": 200 if found else 404, "headers": []})
+        await send({"type": "http.response.body", "body": b""})
+
+    async def send(message: Any) -> None:
+        sent.append(message)
+
+    async def receive() -> Any:
+        return {"type": "http.request", "body": b""}
+
+    guard = SessionGuard(
+        app, origin=ORIGIN, sessions=SessionStore(), cookie=COOKIE, control_prefix="/api/control", control_token=TOKEN
+    )
+    scope = {
+        "type": "http",
+        "path": path,
+        "raw_path": path.encode(),
+        "method": method,
+        "headers": [(b"host", HOST.encode())],
+        "query_string": b"",
+    }
+    asyncio.run(guard(scope, receive, send))
+    return int(sent[0]["status"])
+
+
+@pytest.mark.parametrize(
+    "path",
+    [
+        "//api/secret",
+        "/x/../api/secret",
+        "/static/../api/control/shutdown",
+        "//api/control/shutdown",
+        "/api//secret",
+        "/./api/secret",
+        "/static/..\\api/secret",
+        "/static\\..\\api\\control\\shutdown",
+    ],
+)
+def test_paths_a_later_normalization_could_change_are_refused(path: str) -> None:
+    assert _normalizing_status(path) == 404
+
+
+@pytest.mark.parametrize(("path", "status"), [("/API/secret", 401), ("/Api/Control/shutdown", 401)])
+def test_the_prefixes_match_without_regard_to_case(path: str, status: int) -> None:
+    assert _normalizing_status("/api/secret") == 401  # the control: guarded as expected
+    assert _normalizing_status(path) == status
+
+
+def test_a_control_path_in_another_case_needs_the_control_token() -> None:
+    own = [(b"host", HOST.encode()), (b"content-type", b"application/json")]
+    assert _asgi_status(own, "/API/CONTROL/launch", "POST") == 401
+    auth = (b"authorization", CONTROL_AUTH["Authorization"].encode())
+    assert _asgi_status([*own, auth], "/API/CONTROL/launch", "POST") == 0
+
+
+def test_usual_paths_still_pass() -> None:
+    own = [(b"host", HOST.encode())]
+    for path in ("/", "/assets/app.js", "/api/health", "/api/control/proof", "/assets/v1.2/app.js"):
+        assert _asgi_status(own, path, "GET") == 0, path
+    assert _asgi_status(own, "/api/heartbeat/", "GET") == 401  # a trailing slash is a usual API path
