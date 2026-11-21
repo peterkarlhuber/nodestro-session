@@ -1,0 +1,14 @@
+{
+  "version": 1,
+  "comment": "Mandatory checks (S2) per CI-FAST. A PR is ok only if every listed check ran on the PR head SHA and succeeded. Changing this list needs a reason in the PR.",
+  "pull_request": {
+    "ci.yml": [
+      "lint and types",
+      "test (Python 3.11)",
+      "test (Python 3.13)",
+      "test (macos-latest)",
+      "test (windows-latest)",
+      "second OS user (Linux)"
+    ]
+  }
+}

@@ -1,0 +1,127 @@
+name: CI
+
+# Lint, types and tests of nodestro-session. The package has no internal dependencies, so no studio lock is needed
+# (scripts/studio_lock.sh of the other library repositories reads the lock for sibling packages). Actions are pinned
+# by commit SHA, as in the other repositories. The mandatory jobs are listed in .github/ci-manifest.json; ci-ok.yml
+# reports on them (CI-FAST).
+on:
+  push:
+    branches: [master]
+  pull_request:
+  workflow_dispatch:
+
+permissions:
+  contents: read
+
+concurrency:
+  # A new push to a pull request cancels the older run of that pull request; every other run gets its own group.
+  group: ci-${{ github.workflow }}-${{ github.event.pull_request.number || github.run_id }}
+  cancel-in-progress: ${{ github.event_name == 'pull_request' }}
+
+jobs:
+  lint:
+    name: lint and types
+    runs-on: ubuntu-latest
+    timeout-minutes: 10
+    steps:
+      - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
+        with:
+          persist-credentials: false
+      - uses: actions/setup-python@6d4fd22b20465ccc0f7354476588e8df7c9ca0e0 # v7.1.0
+        with:
+          python-version: "3.13"
+          cache: pip
+      - name: Install
+        run: |
+          python -m pip install "pip>=26.1"
+          pip install -e ".[dev]"
+      - run: ruff check .
+      - run: ruff format --check .
+      - run: mypy
+      # Known vulnerabilities in the installed test tools (as the other repositories check them; the package itself has
+      # no dependencies). Blocking: an advisory that was reviewed and cannot be fixed yet goes into PIP_AUDIT_IGNORE
+      # (space-separated IDs, with the reason here).
+      - name: Dependency audit
+        env:
+          PIP_AUDIT_IGNORE: ""
+        run: |
+          pip install pip-audit==2.10.1
+          args=(); for id in $PIP_AUDIT_IGNORE; do args+=(--ignore-vuln "$id"); done
+          pip-audit --skip-editable --progress-spinner off "${args[@]}"
+
+  test:
+    name: test (Python ${{ matrix.python }})
+    runs-on: ubuntu-latest
+    timeout-minutes: 10
+    strategy:
+      fail-fast: false
+      matrix:
+        python: ["3.11", "3.13"]
+    steps:
+      - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
+        with:
+          persist-credentials: false
+      - uses: actions/setup-python@6d4fd22b20465ccc0f7354476588e8df7c9ca0e0 # v7.1.0
+        with:
+          python-version: ${{ matrix.python }}
+          cache: pip
+      - name: Install
+        run: |
+          python -m pip install "pip>=26.1"
+          pip install -e ".[dev]"
+      - run: mypy
+      - run: pytest
+      # The package itself installs without any third-party package.
+      - name: Install without dependencies
+        run: |
+          python -m venv "$RUNNER_TEMP/bare"
+          "$RUNNER_TEMP/bare/bin/pip" install .
+          test "$("$RUNNER_TEMP/bare/bin/pip" list --format=freeze | grep -v -E '^(pip|setuptools)==' | cut -d= -f1)" = nodestro-session
+          "$RUNNER_TEMP/bare/bin/python" -c "import nodestro_session; print(nodestro_session.__version__)"
+
+  # The platform matrix of N-02: the bind, private-file and Windows DACL tests on macOS and Windows.
+  platforms:
+    name: test (${{ matrix.os }})
+    runs-on: ${{ matrix.os }}
+    timeout-minutes: 15
+    strategy:
+      fail-fast: false
+      matrix:
+        os: [macos-latest, windows-latest]
+    steps:
+      - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
+        with:
+          persist-credentials: false
+      - uses: actions/setup-python@6d4fd22b20465ccc0f7354476588e8df7c9ca0e0 # v7.1.0
+        with:
+          python-version: "3.13"
+          cache: pip
+      - name: Install
+        run: |
+          python -m pip install "pip>=26.1"
+          pip install -e ".[dev]"
+      - run: pytest
+
+  # A second OS user (the runner's "nobody") cannot read the 0600 redirect file or the 0700 state directory.
+  second-user:
+    name: second OS user (Linux)
+    runs-on: ubuntu-latest
+    timeout-minutes: 10
+    env:
+      NODESTRO_SESSION_OTHER_USER: nobody
+    steps:
+      - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
+        with:
+          persist-credentials: false
+      - uses: actions/setup-python@6d4fd22b20465ccc0f7354476588e8df7c9ca0e0 # v7.1.0
+        with:
+          python-version: "3.13"
+          cache: pip
+      - name: Install
+        run: |
+          python -m pip install "pip>=26.1"
+          pip install -e ".[dev]"
+      # The tests must run, not skip: every one of them has to pass.
+      - run: |
+          pytest -v -rs tests/test_second_user.py | tee "$RUNNER_TEMP/second-user.txt"
+          grep -q -E "^=+ 3 passed" "$RUNNER_TEMP/second-user.txt"
