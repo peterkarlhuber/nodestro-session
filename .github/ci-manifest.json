@@ -6,6 +6,7 @@
       "lint and types",
       "test (Python 3.11)",
       "test (Python 3.13)",
+      "test (Python 3.14)",
       "test (macos-latest)",
       "test (windows-latest)",
       "second OS user (Linux)"
