@@ -218,6 +218,22 @@ same time. Each one comes behind a switch that is off by default until its count
 6. `bind_loopback` for the desktop backend (random `127.a.b.c`, `[::1]` guard). The desktop shell chooses the port
    today.
 
+NS-002 (wave 3) builds these steps in nodestro-api (`nodestro_api.launch.LaunchHardening`), each behind its own
+switch, all off. The library is used as it is: `SessionStore.check` for the CSRF value, `set_cookie`/`clear_cookie`,
+`redirect_page` with `ensure_private_dir` and `write_private_file` for the terminal start, and `bind_loopback`.
+
+| Step | Switch | Effect |
+|---|---|---|
+| 1 | `NODESTRO_LAUNCH_TTL=<seconds>` | The launch secret expires that long after the backend's first answer. |
+| 2 | `NODESTRO_LAUNCH_CSRF=1` | Changes need `Origin`, JSON or `multipart/form-data` (or no body) and `X-Nodestro-CSRF`. The launch page hands the value to the studio through `sessionStorage`. |
+| 3 | `NODESTRO_DESKTOP_LOGOUT=1` | `POST /api/logout` ends the window's session. |
+| 4 | `NODESTRO_TERMINAL_LAUNCH=1` | The command line issues a secret, opens a 0600 redirect file and prints the link once. |
+| 5 | `NODESTRO_LAUNCH_FRAGMENT=1` | `/api/launch#token=`, exchanged by the launch page with `POST /api/launch`. `?token=` is refused. |
+| 6 | `NODESTRO_BIND_LOOPBACK=1` | The command line listens through `bind_loopback`. |
+
+With every switch off, the answers are byte-identical to the ones before NS-002. A recorded request matrix in
+nodestro-api `tests/vectors/launch-switches-off.json` checks this.
+
 ### 5.3 Tabrion Studio: later PR in tabrion-studio
 
 Tabrion Studio keeps its own code and behavior in this change. Nothing in tabrion-studio changes now.
@@ -252,7 +268,8 @@ The library has no global state and reads no environment variables. Every protec
 only the product's configuration narrows it: open paths, a control prefix. Optional hardening that is not built yet
 (`peer`) will be off by default, with a policy `off | warn | require`.
 
-In nodestro-api this change adds no switch and turns nothing on: the behavior is unchanged.
+In nodestro-api this change adds no switch and turns nothing on: the behavior is unchanged. The NS-002 switches
+(section 5.2) live in nodestro-api, not here, and are all off by default.
 
 ## 7. Platforms
 
