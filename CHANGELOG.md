@@ -22,3 +22,5 @@
 - Tests: the attack cases of Tabrion Studio's `tests/security` and of nodestro-api's launch, local access and
   handoff tests, ported as regression tests. A Linux CI job with a second OS user shows that the 0600 redirect file
   and the 0700 state directory stay closed to that user.
+- CI: the test matrix also runs Python 3.14 (the newest version Tabrion Studio supports), before Tabrion Studio
+  moves onto the library (NS-003).
