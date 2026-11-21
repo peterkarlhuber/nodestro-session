@@ -8,7 +8,10 @@
   to the origin including the port) and sends it in a header with every API request.
 
 A program on another local port that the browser visits receives the cookie (cookies are not port-scoped), but never
-the CSRF value, so the cookie alone is useless (:class:`nodestro_session.guard.SessionGuard` checks both).
+the CSRF value. The cookie alone opens nothing only where every request needs both:
+:class:`nodestro_session.guard.SessionGuard` checks both on every API path, reads included. A product that checks the
+CSRF value on changes only (nodestro-api's ``NODESTRO_LAUNCH_CSRF``) keeps changes from such a program, but its reads
+still answer to the cookie alone.
 
 Only SHA-256 digests of the session IDs are kept, and sessions are looked up by digest, so the lookup time says
 nothing about a stored ID. The CSRF value is compared in constant time. The store lives in memory only: a restart
