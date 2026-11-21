@@ -258,5 +258,6 @@ In nodestro-api this change adds no switch and turns nothing on: the behavior is
 
 Linux, macOS and Windows. CI runs lint, types and tests on Linux with Python 3.11 and 3.13, and the tests on macOS and
 Windows. A job on Linux creates a second OS user and shows that it cannot read the 0600 redirect file or the 0700
-state directory. macOS has only `127.0.0.1` by default, so `bind_loopback` falls back to it. That is a documented
+state directory. `.github/ci-manifest.json` lists these jobs as mandatory and `ci-ok.yml` reports on them, as in the
+other library repositories. macOS has only `127.0.0.1` by default, so `bind_loopback` falls back to it. That is a documented
 residual risk: the origin is predictable there.

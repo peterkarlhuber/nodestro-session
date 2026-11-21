@@ -2,7 +2,8 @@ name: CI
 
 # Lint, types and tests of nodestro-session. The package has no internal dependencies, so no studio lock is needed
 # (scripts/studio_lock.sh of the other library repositories reads the lock for sibling packages). Actions are pinned
-# by commit SHA, as in the other repositories.
+# by commit SHA, as in the other repositories. The mandatory jobs are listed in .github/ci-manifest.json; ci-ok.yml
+# reports on them (CI-FAST).
 on:
   push:
     branches: [master]
@@ -30,10 +31,23 @@ jobs:
         with:
           python-version: "3.13"
           cache: pip
-      - run: pip install -e ".[dev]"
+      - name: Install
+        run: |
+          python -m pip install "pip>=26.1"
+          pip install -e ".[dev]"
       - run: ruff check .
       - run: ruff format --check .
       - run: mypy
+      # Known vulnerabilities in the installed test tools (as the other repositories check them; the package itself has
+      # no dependencies). Blocking: an advisory that was reviewed and cannot be fixed yet goes into PIP_AUDIT_IGNORE
+      # (space-separated IDs, with the reason here).
+      - name: Dependency audit
+        env:
+          PIP_AUDIT_IGNORE: ""
+        run: |
+          pip install pip-audit==2.10.1
+          args=(); for id in $PIP_AUDIT_IGNORE; do args+=(--ignore-vuln "$id"); done
+          pip-audit --skip-editable --progress-spinner off "${args[@]}"
 
   test:
     name: test (Python ${{ matrix.python }})
@@ -51,7 +65,10 @@ jobs:
         with:
           python-version: ${{ matrix.python }}
           cache: pip
-      - run: pip install -e ".[dev]"
+      - name: Install
+        run: |
+          python -m pip install "pip>=26.1"
+          pip install -e ".[dev]"
       - run: mypy
       - run: pytest
       # The package itself installs without any third-party package.
@@ -79,7 +96,10 @@ jobs:
         with:
           python-version: "3.13"
           cache: pip
-      - run: pip install -e ".[dev]"
+      - name: Install
+        run: |
+          python -m pip install "pip>=26.1"
+          pip install -e ".[dev]"
       - run: pytest
 
   # A second OS user (the runner's "nobody") cannot read the 0600 redirect file or the 0700 state directory.
@@ -97,7 +117,10 @@ jobs:
         with:
           python-version: "3.13"
           cache: pip
-      - run: pip install -e ".[dev]"
+      - name: Install
+        run: |
+          python -m pip install "pip>=26.1"
+          pip install -e ".[dev]"
       # The tests must run, not skip: every one of them has to pass.
       - run: |
           pytest -v -rs tests/test_second_user.py | tee "$RUNNER_TEMP/second-user.txt"
